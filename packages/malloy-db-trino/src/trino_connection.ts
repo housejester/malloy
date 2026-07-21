@@ -54,10 +54,22 @@ export interface TrinoConnectionConfiguration {
   password?: string;
   setupSQL?: string;
   source?: string;
+  // Connection-level client tags surfaced as X-Trino-Client-Tags /
+  // X-Presto-Client-Tags (visible in system.runtime.queries and usable in
+  // resource-group selectors). Connection-layer only in v1.
+  clientTags?: string[];
   extraConfig?: Partial<Record<TrinoExtraConfigKey, unknown>>;
 }
 
 export type TrinoConnectionOptions = ConnectionConfig;
+
+// Client tags ride in an HTTP header, comma-separated. Drop any tag containing
+// a comma (the separator) or CR/LF (which could inject a header) so a tag can't
+// corrupt the header the connector emits; whether a tag is otherwise meaningful
+// is the caller's responsibility.
+function safeClientTags(tags?: string[]): string[] {
+  return (tags ?? []).filter(t => !/[,\r\n]/.test(t));
+}
 
 export interface BaseRunner {
   runSQL(
@@ -68,12 +80,21 @@ export interface BaseRunner {
     columns: {name: string; type: string; error?: string}[];
     error?: string;
     profilingUrl?: string;
+    // Warehouse-assigned query id, for response-side execution metadata.
+    queryId?: string;
   }>;
 }
 
 class PrestoRunner implements BaseRunner {
   client: PrestoClient;
   constructor(config: TrinoConnectionConfiguration) {
+    const extraHeaders: Record<string, string> = {
+      'X-Presto-Session': 'legacy_unnest=true',
+    };
+    const prestoTags = safeClientTags(config.clientTags);
+    if (prestoTags.length > 0) {
+      extraHeaders['X-Presto-Client-Tags'] = prestoTags.join(',');
+    }
     const prestoClientConfig: PrestoClientConfig = {
       catalog: config.catalog,
       host: config.server,
@@ -81,7 +102,8 @@ class PrestoRunner implements BaseRunner {
       schema: config.schema,
       timezone: 'UTC',
       user: config.user || 'anyone',
-      extraHeaders: {'X-Presto-Session': 'legacy_unnest=true'},
+      source: config.source,
+      extraHeaders,
     };
     if (config.user && config.password) {
       prestoClientConfig.basicAuthentication = {
@@ -111,6 +133,7 @@ class PrestoRunner implements BaseRunner {
           ? (ret.columns as {name: string; type: string}[])
           : [],
       error,
+      queryId: ret?.queryId,
     };
   }
 }
@@ -131,8 +154,18 @@ class TrinoRunner implements BaseRunner {
         // If server isn't a parseable URL, leave it as-is
       }
     }
+    const extraConfig = (config.extraConfig ??
+      {}) as Partial<ConnectionOptions>;
+    const extraHeaders: Record<string, string> = {
+      ...(extraConfig.extraHeaders as Record<string, string> | undefined),
+    };
+    const trinoTags = safeClientTags(config.clientTags);
+    if (trinoTags.length > 0) {
+      extraHeaders['X-Trino-Client-Tags'] = trinoTags.join(',');
+    }
     this.client = Trino.create({
-      ...(config.extraConfig as Partial<ConnectionOptions>),
+      ...extraConfig,
+      ...(Object.keys(extraHeaders).length > 0 ? {extraHeaders} : {}),
       source: config.source,
       catalog: config.catalog,
       server,
@@ -151,6 +184,8 @@ class TrinoRunner implements BaseRunner {
       };
     }
     const columns = queryResult.value.columns;
+    // The Trino query id, for response-side execution metadata.
+    const queryId = queryResult.value.id;
 
     const outputRows: unknown[][] = [];
     while (
@@ -171,7 +206,7 @@ class TrinoRunner implements BaseRunner {
     }
     // console.log(outputRows);
     // console.log(columns);
-    return {rows: outputRows, columns};
+    return {rows: outputRows, columns, queryId};
   }
 }
 
@@ -282,7 +317,7 @@ export abstract class TrinoPrestoConnection
       throw new Error(r.error);
     }
 
-    const {rows: inputRows, columns, profilingUrl} = r;
+    const {rows: inputRows, columns, profilingUrl, queryId} = r;
 
     const malloyColumns = columns.map(c =>
       mkFieldDef(this.malloyTypeFromTrinoType(c.type), c.name)
@@ -294,7 +329,16 @@ export abstract class TrinoPrestoConnection
       resultRowToQueryRecord(malloyColumns, row as unknown[], unpack)
     );
 
-    return {rows: malloyRows, totalRows: malloyRows.length, profilingUrl};
+    const runStats: QueryRunStats | undefined = queryId
+      ? {executionMetadata: {trino: {queryId}}}
+      : undefined;
+
+    return {
+      rows: malloyRows,
+      totalRows: malloyRows.length,
+      profilingUrl,
+      runStats,
+    };
   }
 
   public async runSQLBlockAndFetchResultSchema(

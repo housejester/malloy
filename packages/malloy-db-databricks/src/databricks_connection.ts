@@ -120,7 +120,23 @@ export interface DatabricksConfiguration {
   defaultCatalog?: string;
   defaultSchema?: string;
   setupSQL?: string;
+  // Session metadata applied at session open (connection-layer only in v1):
+  // query tags emitted as `SET QUERY_TAGS['<key>'] = '<value>'` and other
+  // session settings as `SET <key> = '<value>'` (setting keys must be bare
+  // identifiers; whether a setting is valid for the warehouse is the caller's
+  // responsibility).
+  queryTags?: Record<string, string>;
+  sessionSettings?: Record<string, string>;
 }
+
+// Escape a value for a single-quoted Databricks/Spark SQL string literal
+// (backslash is the escape character).
+function escapeDatabricksString(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+// A settable session-setting key must be a bare identifier (it is not quoted).
+const SESSION_SETTING_KEY = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 
 export class DatabricksConnection
   extends BaseConnection
@@ -184,6 +200,11 @@ export class DatabricksConnection
     // Malloy timestamps are UTC wallclock
     await this.executeRaw("SET TIME ZONE 'UTC'");
 
+    // Session metadata (query tags + session settings)
+    for (const stmt of this.sessionMetadataStatements()) {
+      await this.executeRaw(stmt);
+    }
+
     // Set catalog and schema if configured
     if (this.config.defaultCatalog) {
       await this.executeRaw(`USE CATALOG ${this.config.defaultCatalog}`);
@@ -214,6 +235,33 @@ export class DatabricksConnection
     return result;
   }
 
+  // Build the SET statements for the connection-level query tags and session
+  // settings, run once at session open. Query tags use Databricks' dedicated
+  // associative-array grammar, all set in a single statement per the
+  // SET QUERY_TAGS reference (`SET QUERY_TAGS['k1'] = 'v1', QUERY_TAGS['k2'] =
+  // 'v2'`); generic settings use `SET <key> = 'value'`. Non-identifier setting
+  // keys are skipped so a key can't break out of its position in the emitted
+  // SQL; whether a setting is meaningful for the warehouse is the caller's
+  // responsibility.
+  private sessionMetadataStatements(): string[] {
+    const statements: string[] = [];
+    const tagAssignments = Object.entries(this.config.queryTags ?? {}).map(
+      ([key, value]) =>
+        `QUERY_TAGS['${escapeDatabricksString(key)}'] = ` +
+        `'${escapeDatabricksString(value)}'`
+    );
+    if (tagAssignments.length > 0) {
+      statements.push(`SET ${tagAssignments.join(', ')}`);
+    }
+    for (const [key, value] of Object.entries(
+      this.config.sessionSettings ?? {}
+    )) {
+      if (!SESSION_SETTING_KEY.test(key)) continue;
+      statements.push(`SET ${key} = '${escapeDatabricksString(value)}'`);
+    }
+    return statements;
+  }
+
   async manifestTemporaryTable(sqlCommand: string): Promise<string> {
     const hash = makeDigest(sqlCommand);
     const tableName = `tt${hash.slice(0, this.dialect.maxIdentifierLength - 2)}`;
@@ -239,6 +287,9 @@ export class DatabricksConnection
 
   public getDigest(): string {
     const {host, path, defaultCatalog, defaultSchema} = this.config;
+    // queryMetadata (query tags + session settings) is session metadata and is
+    // deliberately excluded from the connection digest — changing it must not
+    // re-key the connection.
     return makeDigest(
       'databricks',
       host,
