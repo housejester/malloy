@@ -25,7 +25,6 @@ import type {
   QueryRecord,
   QueryOptionsReader,
   QueryRunStats,
-  QueryExecutionMetadata,
   RunSQLOptions,
   StreamingConnection,
   TableSourceDef,
@@ -41,6 +40,7 @@ import {
   sqlKey,
   makeDigest,
   decodeDottedTablePath,
+  labelsWithApplication,
 } from '@malloydata/malloy';
 import type {TableMetadata} from '@malloydata/malloy/connection';
 import {BaseConnection} from '@malloydata/malloy/connection';
@@ -87,19 +87,43 @@ interface BigQueryConnectionOptions extends ConnectionConfig {
   setupSQL?: string;
 }
 
-/** The BigQuery block of `RunSQLOptions.queryMetadata`. */
-interface BigQueryQueryMetadata {
-  jobLabels?: Record<string, string>;
+// BigQuery label grammar: keys and values are lowercase, <=63 chars, and
+// [a-z0-9_-]; keys must start with a lowercase letter. Tags are transformed to
+// fit (lowercase, disallowed chars -> '_', truncate). Labels whose key can't be
+// made valid (e.g. it starts with a digit) or that exceed the 64-label cap are
+// dropped. This is the one connector that reshapes tags; the transform is
+// documented so the divergence from other engines is predictable.
+const BQ_MAX_LABELS = 64;
+const BQ_MAX_LEN = 63;
+
+function sanitizeBigQueryValue(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_')
+    .slice(0, BQ_MAX_LEN);
 }
 
-/** Read the BigQuery job labels out of a query's metadata, if present. */
-function bigQueryJobLabels(
+function sanitizeBigQueryKey(key: string): string | undefined {
+  const sanitized = sanitizeBigQueryValue(key);
+  return /^[a-z]/.test(sanitized) ? sanitized : undefined;
+}
+
+/** Render a query's tags as BigQuery job labels, transformed to BQ's grammar. */
+function toBigQueryLabels(
   options?: RunSQLOptions
 ): Record<string, string> | undefined {
-  const block = options?.queryMetadata?.bigquery as
-    BigQueryQueryMetadata | undefined;
-  const labels = block?.jobLabels;
-  return labels && typeof labels === 'object' ? labels : undefined;
+  const tags = options?.queryTags;
+  if (!tags) return undefined;
+  const labels = labelsWithApplication(tags);
+  if (!labels) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(labels)) {
+    if (Object.keys(out).length >= BQ_MAX_LABELS) break;
+    const sanitizedKey = sanitizeBigQueryKey(key);
+    if (sanitizedKey === undefined) continue; // can't be a valid BQ key; drop
+    out[sanitizedKey] = sanitizeBigQueryValue(value);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** Merge two label maps (the second wins per key); undefined if both empty. */
@@ -286,7 +310,7 @@ export class BigQueryConnection
     const pageSize = rowLimit ?? defaultOptions.rowLimit;
     // Per-call labels; the connection-default labels are merged in
     // createBigQueryJob so they also cover runtime-internal jobs.
-    const perCallLabels = bigQueryJobLabels(options);
+    const perCallLabels = toBigQueryLabels(options);
 
     try {
       const queryResultsOptions: QueryResultsOptions = {
@@ -309,21 +333,15 @@ export class BigQueryConnection
 
       // TODO even though we have 10 minute timeout limit, we still should confirm that resulting metadata has "jobComplete: true"
       const queryCostBytes = jobResult[2]?.totalBytesProcessed;
-      const executionMetadata: QueryExecutionMetadata | undefined =
-        capture.jobId
-          ? {
-              bigquery: {
-                jobId: capture.jobId,
-                ...(capture.location ? {location: capture.location} : {}),
-              },
-            }
-          : undefined;
       const data: MalloyQueryData = {
         rows: jobResult[0],
         totalRows,
         runStats: {
           queryCostBytes: queryCostBytes ? +queryCostBytes : undefined,
-          executionMetadata,
+          executionId: capture.jobId,
+          executionInfo: capture.location
+            ? {location: capture.location}
+            : undefined,
         },
       };
       const schema = jobResult[2]?.schema;
@@ -792,7 +810,7 @@ export class BigQueryConnection
     // every job (including runtime-internal ones like schema fetches); any
     // per-call labels passed in `options.labels` override them per key.
     const labels = mergeLabels(
-      bigQueryJobLabels(this.readQueryOptions()),
+      toBigQueryLabels(this.readQueryOptions()),
       options.labels
     );
     const [job] = await this.bigQuery.createQueryJob({

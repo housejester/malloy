@@ -43,52 +43,66 @@ function firstJobConfig(spy: jest.SpyInstance): Record<string, unknown> {
   return spy.mock.calls[0][0] as Record<string, unknown>;
 }
 
-describe('db-bigquery queryMetadata wiring (offline)', () => {
+describe('db-bigquery queryTags wiring (offline)', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('applies per-call job labels to createQueryJob', async () => {
+  it('applies per-call labels to createQueryJob', async () => {
     const {conn, spy} = makeConn();
-    await conn.runSQL('SELECT 1', {
-      queryMetadata: {bigquery: {jobLabels: {team: 'finance'}}},
-    });
+    await conn.runSQL('SELECT 1', {queryTags: {labels: {team: 'finance'}}});
     expect(firstJobConfig(spy)['labels']).toEqual({team: 'finance'});
   });
 
-  it('applies connection-default job labels (from queryOptions) to createQueryJob', async () => {
-    const {conn, spy} = makeConn({
-      queryMetadata: {bigquery: {jobLabels: {app: 'my-app'}}},
+  it('folds applicationName in under the reserved label key', async () => {
+    const {conn, spy} = makeConn();
+    await conn.runSQL('SELECT 1', {
+      queryTags: {applicationName: 'my-app', labels: {team: 'finance'}},
     });
+    expect(firstJobConfig(spy)['labels']).toEqual({
+      team: 'finance',
+      application: 'my-app',
+    });
+  });
+
+  it('transforms labels to BigQuery grammar (lowercase, substitute, drop invalid keys)', async () => {
+    const {conn, spy} = makeConn();
+    await conn.runSQL('SELECT 1', {
+      queryTags: {
+        labels: {
+          'CostCenter': 'Eng Team', // uppercase + space -> lowercased, space -> _
+          '2024plan': 'x', // key starts with a digit -> dropped
+        },
+      },
+    });
+    expect(firstJobConfig(spy)['labels']).toEqual({costcenter: 'eng_team'});
+  });
+
+  it('applies connection-default labels (from queryOptions) to createQueryJob', async () => {
+    const {conn, spy} = makeConn({queryTags: {applicationName: 'my-app'}});
     await conn.runSQL('SELECT 1');
-    expect(firstJobConfig(spy)['labels']).toEqual({app: 'my-app'});
+    expect(firstJobConfig(spy)['labels']).toEqual({application: 'my-app'});
   });
 
   it('merges per-call labels over the connection default (per key)', async () => {
     const {conn, spy} = makeConn({
-      queryMetadata: {
-        bigquery: {jobLabels: {app: 'my-app', team: 'default'}},
-      },
+      queryTags: {labels: {app: 'my-app', team: 'default'}},
     });
-    await conn.runSQL('SELECT 1', {
-      queryMetadata: {bigquery: {jobLabels: {team: 'finance'}}},
-    });
+    await conn.runSQL('SELECT 1', {queryTags: {labels: {team: 'finance'}}});
     expect(firstJobConfig(spy)['labels']).toEqual({
       app: 'my-app',
       team: 'finance',
     });
   });
 
-  it('sets no labels when no metadata is present', async () => {
+  it('sets no labels when no tags are present', async () => {
     const {conn, spy} = makeConn();
     await conn.runSQL('SELECT 1');
     expect(firstJobConfig(spy)['labels']).toBeUndefined();
   });
 
-  it('surfaces the job id/location as runStats.executionMetadata.bigquery', async () => {
+  it('surfaces the job id/location as runStats.executionId/executionInfo', async () => {
     const {conn} = makeConn();
     const res = await conn.runSQL('SELECT 1');
-    expect(res.runStats?.executionMetadata?.bigquery).toEqual({
-      jobId: 'job-abc',
-      location: 'US',
-    });
+    expect(res.runStats?.executionId).toBe('job-abc');
+    expect(res.runStats?.executionInfo).toEqual({location: 'US'});
   });
 });

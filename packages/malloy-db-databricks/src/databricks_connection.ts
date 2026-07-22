@@ -13,6 +13,7 @@ import type {
   TableSourceDef,
   SQLSourceRequest,
   QueryOptionsReader,
+  QueryTags,
   RunSQLOptions,
   StructDef,
   AtomicTypeDef,
@@ -24,6 +25,7 @@ import {
   sqlKey,
   makeDigest,
   mkFieldDef,
+  labelsWithApplication,
 } from '@malloydata/malloy';
 import {TinyParser} from '@malloydata/malloy/internal';
 import {BaseConnection} from '@malloydata/malloy/connection';
@@ -120,13 +122,11 @@ export interface DatabricksConfiguration {
   defaultCatalog?: string;
   defaultSchema?: string;
   setupSQL?: string;
-  // Session metadata applied at session open (connection-layer only in v1):
-  // query tags emitted as `SET QUERY_TAGS['<key>'] = '<value>'` and other
-  // session settings as `SET <key> = '<value>'` (setting keys must be bare
-  // identifiers; whether a setting is valid for the warehouse is the caller's
-  // responsibility).
-  queryTags?: Record<string, string>;
-  sessionSettings?: Record<string, string>;
+  // Connection-level query tags, applied at session open via Databricks'
+  // associative-array grammar `SET QUERY_TAGS['key'] = 'value'`. `labels`
+  // (with `applicationName` folded in under the reserved `application` key)
+  // become the tag set; case is preserved. Connection-layer only.
+  queryTags?: QueryTags;
 }
 
 // Escape a value for a single-quoted Databricks/Spark SQL string literal
@@ -134,9 +134,6 @@ export interface DatabricksConfiguration {
 function escapeDatabricksString(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
-
-// A settable session-setting key must be a bare identifier (it is not quoted).
-const SESSION_SETTING_KEY = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 
 export class DatabricksConnection
   extends BaseConnection
@@ -235,31 +232,22 @@ export class DatabricksConnection
     return result;
   }
 
-  // Build the SET statements for the connection-level query tags and session
-  // settings, run once at session open. Query tags use Databricks' dedicated
-  // associative-array grammar, all set in a single statement per the
-  // SET QUERY_TAGS reference (`SET QUERY_TAGS['k1'] = 'v1', QUERY_TAGS['k2'] =
-  // 'v2'`); generic settings use `SET <key> = 'value'`. Non-identifier setting
-  // keys are skipped so a key can't break out of its position in the emitted
-  // SQL; whether a setting is meaningful for the warehouse is the caller's
-  // responsibility.
+  // Build the SET statement for the connection-level query tags, run once at
+  // session open. Uses Databricks' associative-array grammar, all tags set in a
+  // single statement per the SET QUERY_TAGS reference
+  // (`SET QUERY_TAGS['k1'] = 'v1', QUERY_TAGS['k2'] = 'v2'`). Values are escaped;
+  // case is preserved.
   private sessionMetadataStatements(): string[] {
-    const statements: string[] = [];
-    const tagAssignments = Object.entries(this.config.queryTags ?? {}).map(
+    const labels = this.config.queryTags
+      ? labelsWithApplication(this.config.queryTags)
+      : undefined;
+    if (!labels) return [];
+    const tagAssignments = Object.entries(labels).map(
       ([key, value]) =>
         `QUERY_TAGS['${escapeDatabricksString(key)}'] = ` +
         `'${escapeDatabricksString(value)}'`
     );
-    if (tagAssignments.length > 0) {
-      statements.push(`SET ${tagAssignments.join(', ')}`);
-    }
-    for (const [key, value] of Object.entries(
-      this.config.sessionSettings ?? {}
-    )) {
-      if (!SESSION_SETTING_KEY.test(key)) continue;
-      statements.push(`SET ${key} = '${escapeDatabricksString(value)}'`);
-    }
-    return statements;
+    return [`SET ${tagAssignments.join(', ')}`];
   }
 
   async manifestTemporaryTable(sqlCommand: string): Promise<string> {

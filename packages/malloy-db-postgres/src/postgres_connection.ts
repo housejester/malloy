@@ -19,6 +19,7 @@ import type {
   QueryRecord,
   QueryOptionsReader,
   QueryRunStats,
+  QueryTags,
   RunSQLOptions,
   SQLSourceDef,
   TableSourceDef,
@@ -89,12 +90,11 @@ interface PostgresConnectionConfiguration {
   databaseName?: string;
   connectionString?: string;
   setupSQL?: string;
-  // Session metadata applied at session open (connection-layer only in v1):
-  // `SET application_name = '<value>'` plus session GUCs as `SET <key> =
-  // '<value>'` (GUC keys must be bare identifiers; whether a GUC is valid is
-  // the caller's responsibility). application_name is observability-only.
-  applicationName?: string;
-  sessionSettings?: Record<string, string>;
+  // Connection-level query tags, applied at session open. Postgres has no
+  // general key-value tag facility, so only `applicationName` is honored
+  // (`SET application_name = '<value>'`, visible in pg_stat_activity / log
+  // prefixes); `labels` are not applied on Postgres. Connection-layer only.
+  queryTags?: QueryTags;
   // Programmatic callers get pg's full ssl surface (incl. `checkServerIdentity`
   // for verify-ca). Saved/registry config is limited to the serializable
   // PostgresSSLConfig subset — see PostgresConnectionOptions.
@@ -151,9 +151,6 @@ function escapePostgresString(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-// A settable GUC key must be a bare identifier (it is not quoted).
-const POSTGRES_SETTING_KEY = /^[A-Za-z_][A-Za-z0-9_.]*$/;
-
 /**
  * Decode a canonical Postgres dotted-table path into its underlying
  * identifier strings as they appear in `information_schema`. The schema
@@ -186,8 +183,7 @@ export class PostgresConnection
 {
   public readonly name: string;
   protected setupSQL: string | undefined;
-  protected applicationName: string | undefined;
-  protected sessionSettings: Record<string, string> | undefined;
+  protected queryTags: QueryTags | undefined;
   private queryOptionsReader: QueryOptionsReader = {};
   private configReader: PostgresConnectionConfigurationReader = {};
 
@@ -214,17 +210,10 @@ export class PostgresConnection
         this.configReader = configReader;
       }
     } else {
-      const {
-        name,
-        setupSQL,
-        applicationName,
-        sessionSettings,
-        ...configReader
-      } = arg;
+      const {name, setupSQL, queryTags, ...configReader} = arg;
       this.name = name;
       this.setupSQL = setupSQL;
-      this.applicationName = applicationName;
-      this.sessionSettings = sessionSettings;
+      this.queryTags = queryTags;
       this.configReader = configReader;
     }
     if (queryOptionsReader) {
@@ -529,23 +518,16 @@ export class PostgresConnection
     await this.runSQL('SELECT 1');
   }
 
-  // SET statements for the connection-level application_name and session
-  // settings, run at every session open (both the non-pooled and pooled
-  // hooks). Non-identifier GUC keys are skipped so a key can't break out of
-  // its position in the emitted SQL; whether a GUC is meaningful is the
-  // caller's responsibility.
+  // SET statements for the connection-level query tags, run at every session
+  // open (both the non-pooled and pooled hooks). Postgres has no general
+  // key-value tag facility, so only `applicationName` is honored; `labels` are
+  // not applied here.
   protected sessionMetadataStatements(): string[] {
-    const statements: string[] = [];
-    if (this.applicationName !== undefined) {
-      statements.push(
-        `SET application_name = '${escapePostgresString(this.applicationName)}'`
-      );
-    }
-    for (const [key, value] of Object.entries(this.sessionSettings ?? {})) {
-      if (!POSTGRES_SETTING_KEY.test(key)) continue;
-      statements.push(`SET ${key} = '${escapePostgresString(value)}'`);
-    }
-    return statements;
+    const applicationName = this.queryTags?.applicationName;
+    if (applicationName === undefined) return [];
+    return [
+      `SET application_name = '${escapePostgresString(applicationName)}'`,
+    ];
   }
 
   public async connectionSetup(client: Client): Promise<void> {

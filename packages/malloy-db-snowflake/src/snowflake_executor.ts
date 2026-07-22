@@ -17,27 +17,34 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type {Readable} from 'stream';
 import type {QueryData, QueryRecord, RunSQLOptions} from '@malloydata/malloy';
-import {toAsyncGenerator} from '@malloydata/malloy';
+import {labelsWithApplication, toAsyncGenerator} from '@malloydata/malloy';
 
 // Disable snowflake-sdk logging by default (issue #2565)
 snowflake.configure({logLevel: 'OFF'});
 
-/** The Snowflake block of `RunSQLOptions.queryMetadata`. */
-interface SnowflakeQueryMetadata {
-  queryTag?: string;
-}
+// Snowflake QUERY_TAG is a single free-form string, max 2000 chars.
+const MAX_QUERY_TAG_LENGTH = 2000;
 
 /**
- * Resolve the Snowflake `QUERY_TAG` from a query's metadata, if present. The
- * tag is applied per statement via `parameters.QUERY_TAG` (see `_execute`);
+ * Render a query's tags into a Snowflake `QUERY_TAG` value: the label set
+ * (with `applicationName` folded in) serialized as JSON, so the structured
+ * labels are queryable in `QUERY_HISTORY` / `QUERY_ATTRIBUTION_HISTORY`. Case
+ * is preserved. Clamped to Snowflake's 2000-char limit as a runtime backstop.
+ *
+ * The tag is applied per statement via `parameters.QUERY_TAG` (see `_execute`);
  * the connection-level `connOptions.queryTag` is deliberately never set,
  * because the SDK overwrites caller-supplied per-statement parameters whenever
  * it is (snowflake-sdk `statement.js`).
  */
 export function snowflakeQueryTag(options?: RunSQLOptions): string | undefined {
-  const block = options?.queryMetadata?.snowflake as
-    SnowflakeQueryMetadata | undefined;
-  return typeof block?.queryTag === 'string' ? block.queryTag : undefined;
+  const tags = options?.queryTags;
+  if (!tags) return undefined;
+  const labels = labelsWithApplication(tags);
+  if (!labels) return undefined;
+  const tag = JSON.stringify(labels);
+  return tag.length > MAX_QUERY_TAG_LENGTH
+    ? tag.slice(0, MAX_QUERY_TAG_LENGTH)
+    : tag;
 }
 
 export interface ConnectionConfigFile {

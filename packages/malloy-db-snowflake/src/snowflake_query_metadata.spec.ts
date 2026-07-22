@@ -53,92 +53,98 @@ const CONN_OPTIONS = {account: 'test', username: 'test'};
 
 const lastCall = (calls: ExecCall[]): ExecCall => calls[calls.length - 1];
 
+// Parse a captured QUERY_TAG value (it is a JSON string) into an object.
+const tagOf = (call: ExecCall): unknown =>
+  JSON.parse((call.parameters as {QUERY_TAG: string}).QUERY_TAG);
+
 describe('snowflakeQueryTag', () => {
-  it('reads queryMetadata.snowflake.queryTag', () => {
+  it('renders labels as a JSON QUERY_TAG', () => {
     expect(
-      snowflakeQueryTag({
-        queryMetadata: {snowflake: {queryTag: 'team:finance'}},
-      })
-    ).toBe('team:finance');
+      JSON.parse(snowflakeQueryTag({queryTags: {labels: {team: 'finance'}}})!)
+    ).toEqual({team: 'finance'});
   });
 
-  it('returns undefined when the tag is absent at any level', () => {
+  it('folds applicationName in under the reserved key', () => {
+    expect(
+      JSON.parse(
+        snowflakeQueryTag({
+          queryTags: {applicationName: 'my-app', labels: {team: 'finance'}},
+        })!
+      )
+    ).toEqual({team: 'finance', application: 'my-app'});
+  });
+
+  it('preserves case', () => {
+    expect(
+      JSON.parse(snowflakeQueryTag({queryTags: {labels: {Team: 'Finance'}}})!)
+    ).toEqual({Team: 'Finance'});
+  });
+
+  it('returns undefined when there are no tags', () => {
     expect(snowflakeQueryTag(undefined)).toBeUndefined();
     expect(snowflakeQueryTag({})).toBeUndefined();
-    expect(snowflakeQueryTag({queryMetadata: {}})).toBeUndefined();
-    expect(snowflakeQueryTag({queryMetadata: {snowflake: {}}})).toBeUndefined();
-  });
-
-  it('ignores a non-string queryTag', () => {
-    expect(
-      snowflakeQueryTag({
-        queryMetadata: {snowflake: {queryTag: 123 as unknown as string}},
-      })
-    ).toBeUndefined();
+    expect(snowflakeQueryTag({queryTags: {}})).toBeUndefined();
+    expect(snowflakeQueryTag({queryTags: {labels: {}}})).toBeUndefined();
   });
 });
 
-describe('db-snowflake queryMetadata wiring (offline)', () => {
+describe('db-snowflake queryTags wiring (offline)', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('applies a per-call query tag as parameters.QUERY_TAG on the data statement', async () => {
+  it('applies per-call tags as a JSON parameters.QUERY_TAG on the data statement', async () => {
     const {calls} = installFakeSnowflake();
     const conn = new SnowflakeConnection('sf', {connOptions: CONN_OPTIONS});
     await conn.runSQL('SELECT 1 AS T', {
-      queryMetadata: {snowflake: {queryTag: 'team:finance'}},
+      queryTags: {labels: {team: 'finance'}},
     });
     expect(lastCall(calls).sqlText).toBe('SELECT 1 AS T');
-    expect(lastCall(calls).parameters).toEqual({QUERY_TAG: 'team:finance'});
+    expect(tagOf(lastCall(calls))).toEqual({team: 'finance'});
   });
 
-  it('applies the connection-default tag (from queryOptions) to every statement, including session init', async () => {
+  it('applies the connection-default tags (from queryOptions) to every statement, including session init', async () => {
     const {calls} = installFakeSnowflake();
     const conn = new SnowflakeConnection('sf', {
       connOptions: CONN_OPTIONS,
-      queryOptions: {queryMetadata: {snowflake: {queryTag: 'app:my-app'}}},
+      queryOptions: {queryTags: {applicationName: 'my-app'}},
     });
     await conn.runSQL('SELECT 1 AS T');
-    // Session-init ALTER SESSION statements run before the data query; all of
-    // them carry the connection-default tag.
     expect(calls.length).toBeGreaterThan(1);
     for (const c of calls) {
-      expect(c.parameters).toEqual({QUERY_TAG: 'app:my-app'});
+      expect(tagOf(c)).toEqual({application: 'my-app'});
     }
   });
 
-  it('lets a per-call tag override the connection default on the data statement', async () => {
+  it('lets per-call tags override the connection default on the data statement', async () => {
     const {calls} = installFakeSnowflake();
     const conn = new SnowflakeConnection('sf', {
       connOptions: CONN_OPTIONS,
-      queryOptions: {queryMetadata: {snowflake: {queryTag: 'app:my-app'}}},
+      queryOptions: {queryTags: {applicationName: 'my-app'}},
     });
     await conn.runSQL('SELECT 1 AS T', {
-      queryMetadata: {snowflake: {queryTag: 'team:finance'}},
+      queryTags: {labels: {team: 'finance'}},
     });
-    expect(lastCall(calls).parameters).toEqual({QUERY_TAG: 'team:finance'});
+    expect(tagOf(lastCall(calls))).toEqual({team: 'finance'});
   });
 
-  it('sets no parameters when no tag is present', async () => {
+  it('sets no parameters when no tags are present', async () => {
     const {calls} = installFakeSnowflake();
     const conn = new SnowflakeConnection('sf', {connOptions: CONN_OPTIONS});
     await conn.runSQL('SELECT 1 AS T');
     expect(lastCall(calls).parameters).toBeUndefined();
   });
 
-  it('surfaces the warehouse query id as runStats.executionMetadata.snowflake.queryId', async () => {
+  it('surfaces the warehouse query id as runStats.executionId', async () => {
     installFakeSnowflake('01ab-2345');
     const conn = new SnowflakeConnection('sf', {connOptions: CONN_OPTIONS});
     const res = await conn.runSQL('SELECT 1 AS T');
-    expect(res.runStats?.executionMetadata?.snowflake).toEqual({
-      queryId: '01ab-2345',
-    });
+    expect(res.runStats?.executionId).toBe('01ab-2345');
   });
 
   it('never injects queryTag into the connection options (per-statement only)', () => {
     const {spy} = installFakeSnowflake();
     new SnowflakeConnection('sf', {
       connOptions: CONN_OPTIONS,
-      queryOptions: {queryMetadata: {snowflake: {queryTag: 'app:my-app'}}},
+      queryOptions: {queryTags: {applicationName: 'my-app'}},
     });
     const passedConnOptions = spy.mock.calls[0][0] as Record<string, unknown>;
     expect(passedConnOptions['queryTag']).toBeUndefined();

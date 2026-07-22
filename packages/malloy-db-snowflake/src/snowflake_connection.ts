@@ -285,7 +285,7 @@ export class SnowflakeConnection
       rows = rows.slice(0, rowLimit);
     }
     const runStats: QueryRunStats | undefined = capture.queryId
-      ? {executionMetadata: {snowflake: {queryId: capture.queryId}}}
+      ? {executionId: capture.queryId}
       : undefined;
     return {rows, totalRows: rows.length, runStats};
   }

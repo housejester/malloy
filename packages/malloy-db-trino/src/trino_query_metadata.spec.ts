@@ -27,19 +27,21 @@ function fakeRunner(queryId?: string): BaseRunner {
   };
 }
 
-describe('db-trino queryMetadata wiring (offline)', () => {
+describe('db-trino queryTags wiring (offline)', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  describe('request side — client tags / source at construction', () => {
-    it('Trino: passes source + X-Trino-Client-Tags to Trino.create', () => {
+  describe('request side — applicationName -> source, labels -> client tags', () => {
+    it('Trino: maps applicationName to source and labels to X-Trino-Client-Tags', () => {
       const createSpy = jest
         .spyOn(Trino, 'create')
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .mockReturnValue({} as any);
       new TrinoConnection('t', undefined, {
         server: 'http://localhost:8080',
-        source: 'my-app',
-        clientTags: ['team:finance', 'env:prod'],
+        queryTags: {
+          applicationName: 'my-app',
+          labels: {team: 'finance', env: 'prod'},
+        },
       });
       const opts = createSpy.mock.calls[0][0] as {
         source?: string;
@@ -51,7 +53,7 @@ describe('db-trino queryMetadata wiring (offline)', () => {
       );
     });
 
-    it('Trino: sets no client-tags header when none are configured', () => {
+    it('Trino: sets no client-tags header when there are no labels', () => {
       const createSpy = jest
         .spyOn(Trino, 'create')
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -63,27 +65,29 @@ describe('db-trino queryMetadata wiring (offline)', () => {
       expect(opts.extraHeaders?.['X-Trino-Client-Tags']).toBeUndefined();
     });
 
-    it('Trino: drops client tags containing header-unsafe characters', () => {
+    it('Trino: drops labels that would corrupt/inject the header', () => {
       const createSpy = jest
         .spyOn(Trino, 'create')
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .mockReturnValue({} as any);
       new TrinoConnection('t', undefined, {
         server: 'http://localhost:8080',
-        clientTags: ['ok', 'bad\ninject', 'has,comma'],
+        queryTags: {labels: {ok: 'v', evil: 'a\nb', csv: 'a,b'}},
       });
       const opts = createSpy.mock.calls[0][0] as {
         extraHeaders?: Record<string, string>;
       };
-      expect(opts.extraHeaders?.['X-Trino-Client-Tags']).toBe('ok');
+      expect(opts.extraHeaders?.['X-Trino-Client-Tags']).toBe('ok:v');
     });
 
-    it('Presto: passes source + X-Presto-Client-Tags to the client', () => {
+    it('Presto: maps applicationName to source and labels to X-Presto-Client-Tags', () => {
       PrestoClientMock.mockClear();
       new PrestoConnection('p', undefined, {
         server: 'localhost',
-        source: 'my-app',
-        clientTags: ['team:finance', 'env:prod'],
+        queryTags: {
+          applicationName: 'my-app',
+          labels: {team: 'finance', env: 'prod'},
+        },
       });
       const cfg = PrestoClientMock.mock.calls[0][0] as {
         source?: string;
@@ -96,7 +100,7 @@ describe('db-trino queryMetadata wiring (offline)', () => {
     });
   });
 
-  describe('response side — query id into runStats.executionMetadata', () => {
+  describe('response side — query id into runStats.executionId', () => {
     it('Trino: surfaces the query id', async () => {
       jest
         .spyOn(Trino, 'create')
@@ -108,9 +112,7 @@ describe('db-trino queryMetadata wiring (offline)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (conn as any).client = fakeRunner('20240101_000001_abcde');
       const res = await conn.runSQL('SELECT 1');
-      expect(res.runStats?.executionMetadata?.trino).toEqual({
-        queryId: '20240101_000001_abcde',
-      });
+      expect(res.runStats?.executionId).toBe('20240101_000001_abcde');
     });
 
     it('Presto: surfaces the query id', async () => {
@@ -118,9 +120,7 @@ describe('db-trino queryMetadata wiring (offline)', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (conn as any).client = fakeRunner('20240101_000002_fghij');
       const res = await conn.runSQL('SELECT 1');
-      expect(res.runStats?.executionMetadata?.trino).toEqual({
-        queryId: '20240101_000002_fghij',
-      });
+      expect(res.runStats?.executionId).toBe('20240101_000002_fghij');
     });
 
     it('omits runStats when the runner reports no query id', async () => {

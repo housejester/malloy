@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+import type {QueryTags} from '@malloydata/malloy';
 import type {Client} from 'pg';
 import {PostgresConnection} from './postgres_connection';
 
@@ -19,23 +20,34 @@ function fakeClient(): {client: Client; calls: string[]} {
   return {client, calls};
 }
 
-describe('db-postgres query metadata (offline)', () => {
-  it('emits SET application_name + GUCs after SET TIME ZONE at session open', async () => {
+describe('db-postgres query tags (offline)', () => {
+  it('maps applicationName to SET application_name after SET TIME ZONE', async () => {
     const conn = new PostgresConnection({
       name: 'pg',
-      applicationName: 'my-app',
-      sessionSettings: {statement_timeout: '60s'},
+      queryTags: {applicationName: 'my-app'},
     });
     const {client, calls} = fakeClient();
     await conn.connectionSetup(client);
     expect(calls).toEqual([
       "SET TIME ZONE 'UTC'",
       "SET application_name = 'my-app'",
-      "SET statement_timeout = '60s'",
     ]);
   });
 
-  it('emits only SET TIME ZONE when no query metadata is configured', async () => {
+  it('does not apply labels (Postgres has no general tag facility)', async () => {
+    const conn = new PostgresConnection({
+      name: 'pg',
+      queryTags: {applicationName: 'my-app', labels: {team: 'finance'}},
+    });
+    const {client, calls} = fakeClient();
+    await conn.connectionSetup(client);
+    expect(calls).toEqual([
+      "SET TIME ZONE 'UTC'",
+      "SET application_name = 'my-app'",
+    ]);
+  });
+
+  it('emits only SET TIME ZONE when no query tags are configured', async () => {
     const conn = new PostgresConnection({name: 'pg'});
     const {client, calls} = fakeClient();
     await conn.connectionSetup(client);
@@ -45,34 +57,21 @@ describe('db-postgres query metadata (offline)', () => {
   it('escapes single quotes in the application_name value', async () => {
     const conn = new PostgresConnection({
       name: 'pg',
-      applicationName: "my'app",
+      queryTags: {applicationName: "my'app"},
     });
     const {client, calls} = fakeClient();
     await conn.connectionSetup(client);
     expect(calls).toContain("SET application_name = 'my''app'");
   });
 
-  it('skips GUC keys that are not bare identifiers', async () => {
-    const conn = new PostgresConnection({
-      name: 'pg',
-      sessionSettings: {'bad key; DROP': 'x', 'search_path': 'analytics'},
-    });
-    const {client, calls} = fakeClient();
-    await conn.connectionSetup(client);
-    expect(calls).toContain("SET search_path = 'analytics'");
-    expect(calls.some(s => s.includes('bad key'))).toBe(false);
-  });
-
   describe('connection digest', () => {
-    const digest = (opts: {
-      applicationName?: string;
-      sessionSettings?: Record<string, string>;
-    }): string => new PostgresConnection({name: 'pg', ...opts}).getDigest();
+    const digest = (queryTags?: QueryTags): string =>
+      new PostgresConnection({name: 'pg', queryTags}).getDigest();
 
-    it('excludes query metadata (both application_name and session settings)', () => {
-      const base = digest({});
+    it('excludes query tags', () => {
+      const base = digest();
       expect(digest({applicationName: 'my-app'})).toBe(base);
-      expect(digest({sessionSettings: {some_setting: 'x'}})).toBe(base);
+      expect(digest({labels: {team: 'finance'}})).toBe(base);
     });
   });
 });

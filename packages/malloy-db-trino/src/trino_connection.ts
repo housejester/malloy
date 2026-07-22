@@ -10,6 +10,7 @@ import type {
   QueryData,
   QueryOptionsReader,
   QueryRunStats,
+  QueryTags,
   RunSQLOptions,
   StructDef,
   TableSourceDef,
@@ -54,21 +55,29 @@ export interface TrinoConnectionConfiguration {
   password?: string;
   setupSQL?: string;
   source?: string;
-  // Connection-level client tags surfaced as X-Trino-Client-Tags /
-  // X-Presto-Client-Tags (visible in system.runtime.queries and usable in
-  // resource-group selectors). Connection-layer only in v1.
-  clientTags?: string[];
+  // Connection-level query tags. `applicationName` maps to Trino `source`;
+  // `labels` become `key:value` client tags (X-Trino-Client-Tags /
+  // X-Presto-Client-Tags — visible in system.runtime.queries and usable in
+  // resource-group selectors). Connection-layer only.
+  queryTags?: QueryTags;
   extraConfig?: Partial<Record<TrinoExtraConfigKey, unknown>>;
 }
 
 export type TrinoConnectionOptions = ConnectionConfig;
 
-// Client tags ride in an HTTP header, comma-separated. Drop any tag containing
-// a comma (the separator) or CR/LF (which could inject a header) so a tag can't
-// corrupt the header the connector emits; whether a tag is otherwise meaningful
-// is the caller's responsibility.
-function safeClientTags(tags?: string[]): string[] {
-  return (tags ?? []).filter(t => !/[,\r\n]/.test(t));
+// `labels` become `key:value` client tags, joined into an HTTP header. Drop any
+// tag containing a comma (the separator) or CR/LF (which would corrupt or inject
+// the header); semantic validity of a tag is the caller's responsibility.
+function trinoClientTags(tags?: QueryTags): string[] {
+  const labels = tags?.labels ?? {};
+  return Object.entries(labels)
+    .map(([key, value]) => `${key}:${value}`)
+    .filter(tag => !/[,\r\n]/.test(tag));
+}
+
+// applicationName maps to Trino's native `source`, falling back to config.source.
+function trinoSource(config: TrinoConnectionConfiguration): string | undefined {
+  return config.queryTags?.applicationName ?? config.source;
 }
 
 export interface BaseRunner {
@@ -91,7 +100,7 @@ class PrestoRunner implements BaseRunner {
     const extraHeaders: Record<string, string> = {
       'X-Presto-Session': 'legacy_unnest=true',
     };
-    const prestoTags = safeClientTags(config.clientTags);
+    const prestoTags = trinoClientTags(config.queryTags);
     if (prestoTags.length > 0) {
       extraHeaders['X-Presto-Client-Tags'] = prestoTags.join(',');
     }
@@ -102,7 +111,7 @@ class PrestoRunner implements BaseRunner {
       schema: config.schema,
       timezone: 'UTC',
       user: config.user || 'anyone',
-      source: config.source,
+      source: trinoSource(config),
       extraHeaders,
     };
     if (config.user && config.password) {
@@ -159,14 +168,14 @@ class TrinoRunner implements BaseRunner {
     const extraHeaders: Record<string, string> = {
       ...(extraConfig.extraHeaders as Record<string, string> | undefined),
     };
-    const trinoTags = safeClientTags(config.clientTags);
+    const trinoTags = trinoClientTags(config.queryTags);
     if (trinoTags.length > 0) {
       extraHeaders['X-Trino-Client-Tags'] = trinoTags.join(',');
     }
     this.client = Trino.create({
       ...extraConfig,
       ...(Object.keys(extraHeaders).length > 0 ? {extraHeaders} : {}),
-      source: config.source,
+      source: trinoSource(config),
       catalog: config.catalog,
       server,
       schema: config.schema,
@@ -330,7 +339,7 @@ export abstract class TrinoPrestoConnection
     );
 
     const runStats: QueryRunStats | undefined = queryId
-      ? {executionMetadata: {trino: {queryId}}}
+      ? {executionId: queryId}
       : undefined;
 
     return {
