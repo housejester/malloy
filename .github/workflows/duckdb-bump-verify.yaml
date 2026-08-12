@@ -78,15 +78,19 @@ jobs:
           EOF
           node smoke.mjs
 
+  # No Windows leg here: the canary requires building the malloy monorepo,
+  # which is a linux/macos-only path (core CI is ubuntu-only and the build
+  # scripts are not Windows-clean — verified unrelated to this bump). Windows
+  # coverage comes from engine-smoke and the tarball-fed vscode-dry-run, which
+  # mirror what Windows consumers actually do: install published artifacts.
   consumer-canary:
     name: consumer-canary (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - name: Use Node.js
@@ -100,8 +104,44 @@ jobs:
       - name: Consumer canary (bundle + plain ts-jest)
         run: npm run consumer-canary
 
+  # Build the monorepo and pack the tarball closure ONCE on ubuntu; the
+  # dry-run matrix consumes the artifact. Tarballs are platform-independent
+  # (compiled JS + package manifests; native binaries come from the registry
+  # at install time), and this mirrors reality: downstream platforms install
+  # published artifacts, they never build the monorepo.
+  pack-tarballs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: '.node-version'
+      - name: Build malloy and pack tarballs
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+          mkdir -p tarballs
+          # The extension's @malloydata dependency closure: its 14 direct core
+          # packages plus malloy-tag, malloy-filter, db-databricks (internal
+          # deps pinned at this monorepo version, not yet on the registry).
+          for d in malloy malloy-connections malloy-db-bigquery malloy-db-databricks \
+                   malloy-db-duckdb malloy-db-mysql malloy-db-postgres malloy-db-publisher \
+                   malloy-db-snowflake malloy-db-trino malloy-filter malloy-interfaces \
+                   malloy-malloy-sql malloy-query-builder malloy-render malloy-syntax-highlight \
+                   malloy-tag; do
+            npm pack -w "packages/$d" --pack-destination tarballs --silent > /dev/null
+          done
+          ls tarballs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: malloy-tarballs
+          path: tarballs/
+
   vscode-dry-run:
     name: vscode-dry-run (${{ matrix.os }})
+    needs: pack-tarballs
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     continue-on-error: ${{ matrix.os == 'windows-latest' }}
@@ -112,32 +152,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          path: malloy
-      - uses: actions/checkout@v5
-        with:
           repository: malloydata/malloy-vscode-extension
           path: extension
+      - uses: actions/download-artifact@v8
+        with:
+          name: malloy-tarballs
+          path: tarballs
       - name: Use Node.js
         uses: actions/setup-node@v5
         with:
-          node-version-file: 'malloy/.node-version'
-      - name: Build malloy and pack tarballs
-        run: |
-          cd malloy
-          npm ci --no-fund --no-audit
-          npm run build
-          mkdir -p ../tarballs
-          # The extension's @malloydata dependency closure: its 14 direct core
-          # packages plus malloy-tag, malloy-filter, db-databricks (internal
-          # deps pinned at this monorepo version, not yet on the registry).
-          for d in malloy malloy-connections malloy-db-bigquery malloy-db-databricks \
-                   malloy-db-duckdb malloy-db-mysql malloy-db-postgres malloy-db-publisher \
-                   malloy-db-snowflake malloy-db-trino malloy-filter malloy-interfaces \
-                   malloy-malloy-sql malloy-query-builder malloy-render malloy-syntax-highlight \
-                   malloy-tag; do
-            npm pack -w "packages/$d" --pack-destination ../tarballs --silent > /dev/null
-          done
-          ls ../tarballs
+          node-version: '24'
       - name: Install tarballs via the extension's update flow
         run: |
           cd extension
