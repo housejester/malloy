@@ -1,0 +1,162 @@
+name: 'DuckDB Bump Verify'
+permissions: {}
+
+# Cross-platform verification for the @duckdb/node-api 1.5.3-r.2 -> 1.5.5-r.4
+# bump (malloydata/malloy PR #3035). Three angles:
+#
+#   engine-smoke      installs the bumped bindings from the registry on every
+#                     supported platform (incl. Windows and Alpine/musl), runs
+#                     a query, and INSTALL/LOADs the ducklake extension to
+#                     prove per-platform extension-CDN availability.
+#   consumer-canary   malloy's own downstream-consumer contract test (bundle
+#                     like a consumer, load all connectors, run a DuckDB
+#                     query), on the bumped branch, per OS.
+#   vscode-dry-run    dry-runs the malloy-vscode-extension version bump against
+#                     tarballs packed from this branch, using the extension's
+#                     own update flow (sync-duckdb, check-native, build, test).
+#
+# Lives only on this verification branch of the fork; not intended to merge.
+
+on:
+  push:
+    branches: [jde/duckdb-verify-ci]
+  workflow_dispatch:
+
+env:
+  NODE_API_VERSION: 1.5.5-r.4
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  engine-smoke:
+    name: engine-smoke (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x64,   os: ubuntu-latest }
+          - { label: linux-arm64, os: ubuntu-24.04-arm }
+          - { label: linux-x64-musl, os: ubuntu-latest, container: 'node:24-alpine' }
+          - { label: macos-arm64, os: macos-latest }
+          - { label: macos-x64,   os: macos-13 }
+          - { label: windows-x64, os: windows-latest }
+    steps:
+      - name: Install bash (alpine container)
+        if: matrix.container != null
+        shell: sh
+        run: apk add --no-cache bash
+      - name: Use Node.js
+        if: matrix.container == null
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Install bumped bindings from registry
+        run: |
+          mkdir smoke && cd smoke
+          npm init -y > /dev/null
+          npm install --no-fund --no-audit "@duckdb/node-api@${NODE_API_VERSION}"
+      - name: Query + ducklake extension load
+        run: |
+          cd smoke
+          cat > smoke.mjs <<'EOF'
+          import { DuckDBInstance } from '@duckdb/node-api';
+          const instance = await DuckDBInstance.create(':memory:');
+          const conn = await instance.connect();
+          const version = (await (await conn.runAndReadAll('SELECT version()')).getRows())[0][0];
+          const answer = (await (await conn.runAndReadAll('SELECT 6 * 7')).getRows())[0][0];
+          if (String(answer) !== '42') throw new Error(`query returned ${answer}`);
+          await conn.run('INSTALL ducklake; LOAD ducklake;');
+          const ducklake = (await (await conn.runAndReadAll(
+            "SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'ducklake'",
+          )).getRows())[0][0];
+          console.log(`engine ${version} | query OK | ducklake extension ${ducklake}`);
+          EOF
+          node smoke.mjs
+
+  consumer-canary:
+    name: consumer-canary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: '.node-version'
+      - name: Install
+        run: npm ci --no-fund --no-audit
+      - name: Build
+        run: npm run build
+      - name: Consumer canary (bundle + plain ts-jest)
+        run: npm run consumer-canary
+
+  vscode-dry-run:
+    name: vscode-dry-run (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: malloy
+      - uses: actions/checkout@v5
+        with:
+          repository: malloydata/malloy-vscode-extension
+          path: extension
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: 'malloy/.node-version'
+      - name: Build malloy and pack tarballs
+        run: |
+          cd malloy
+          npm ci --no-fund --no-audit
+          npm run build
+          mkdir -p ../tarballs
+          # The extension's @malloydata dependency closure: its 14 direct core
+          # packages plus malloy-tag, malloy-filter, db-databricks (internal
+          # deps pinned at this monorepo version, not yet on the registry).
+          for d in malloy malloy-connections malloy-db-bigquery malloy-db-databricks \
+                   malloy-db-duckdb malloy-db-mysql malloy-db-postgres malloy-db-publisher \
+                   malloy-db-snowflake malloy-db-trino malloy-filter malloy-interfaces \
+                   malloy-malloy-sql malloy-query-builder malloy-render malloy-syntax-highlight \
+                   malloy-tag; do
+            npm pack -w "packages/$d" --pack-destination ../tarballs --silent > /dev/null
+          done
+          ls ../tarballs
+      - name: Install tarballs via the extension's update flow
+        run: |
+          cd extension
+          npm ci --no-fund --no-audit
+          npm install --no-fund --no-audit --save-exact ../tarballs/*.tgz
+          npx ts-node scripts/sync-duckdb.ts
+          grep '"@duckdb/node-api"' package.json
+          npm install --no-fund --no-audit
+          npm run check-native
+      - name: Verify resolved versions
+        run: |
+          cd extension
+          node -e "
+            const api = require('@duckdb/node-api/package.json').version;
+            const dbd = require('@malloydata/db-duckdb/package.json').version;
+            console.log('node-api', api, '| db-duckdb', dbd);
+            if (api !== process.env.NODE_API_VERSION) throw new Error('node-api not bumped: ' + api);
+          "
+      - name: Build extension (tsc + esbuild bundle)
+        run: cd extension && npm run build
+      - name: Test extension
+        run: cd extension && npm test
