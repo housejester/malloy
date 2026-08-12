@@ -150,6 +150,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      # Keep LF endings on Windows checkouts: the extension's lint (prettier)
+      # runs as a posttest hook and rejects the CRLF that autocrlf introduces.
+      - name: Disable git autocrlf (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v5
         with:
           repository: malloydata/malloy-vscode-extension
