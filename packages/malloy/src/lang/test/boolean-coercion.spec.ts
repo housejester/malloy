@@ -210,7 +210,6 @@ describe('boolean coercion on a dialect without boolean values', () => {
       expect(sql).toMatch(
         /WHERE \(CASE WHEN LEFT\(.*\) = N'a' THEN 1 ELSE 0 END = 1\)/
       );
-      expect(sql).not.toContain('CASE');
     });
     test('raw SQL decides for itself', () => {
       const sql = sqlOf(
