@@ -64,7 +64,8 @@ export class FieldInstanceField implements FieldInstance {
     resultSet: FieldInstanceResult,
     context: QueryStruct,
     expr: Expr,
-    state?: GenerateState
+    state?: GenerateState,
+    want?: 'value' | 'condition'
   ) => string;
 
   static registerExpressionCompiler(
@@ -72,7 +73,8 @@ export class FieldInstanceField implements FieldInstance {
       resultSet: FieldInstanceResult,
       context: QueryStruct,
       expr: Expr,
-      state?: GenerateState
+      state?: GenerateState,
+      want?: 'value' | 'condition'
     ) => string
   ) {
     FieldInstanceField.exprCompiler = compiler;
@@ -110,7 +112,9 @@ export class FieldInstanceField implements FieldInstance {
       return FieldInstanceField.exprCompiler(
         this.parent,
         this.f.parent,
-        this.f.fieldDef.e
+        this.f.fieldDef.e,
+        undefined,
+        this.fieldUsage.type === 'where' ? 'condition' : 'value'
       );
     }
 

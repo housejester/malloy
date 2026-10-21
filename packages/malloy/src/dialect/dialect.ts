@@ -1242,6 +1242,37 @@ export abstract class Dialect {
   }
 
   /**
+   * Malloy's `not`: of NULL, true. A dialect without boolean values writes
+   * the test as a condition.
+   */
+  sqlNot(condition: string): string {
+    return `COALESCE(NOT ${condition},TRUE)`;
+  }
+
+  /**
+   * A condition Malloy defines as true when SQL says NULL: `!=` and `!~`
+   */
+  sqlNullIsTrue(condition: string): string {
+    return `COALESCE(${condition},true)`;
+  }
+
+  /**
+   * A condition, where SQL wants a value. A dialect whose booleans are
+   * values has nothing to do; one without boolean values writes the value
+   * the condition became.
+   */
+  sqlConditionAsValue(condition: string): string {
+    return condition;
+  }
+
+  /**
+   * A value, where SQL wants a condition: the inverse of sqlConditionAsValue
+   */
+  sqlValueAsCondition(value: string): string {
+    return value;
+  }
+
+  /**
    * What a boolean value looks like in a query result
    */
   resultBoolean(bv: boolean) {

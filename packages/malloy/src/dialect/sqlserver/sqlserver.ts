@@ -191,6 +191,24 @@ export class SQLServerDialect extends Dialect {
   // condition is expected, `true` and `false` are (1=1) and (1=0), a `bit`
   // column is an integer, and a cast to boolean is refused.
   booleanType: BooleanTypeSupport = 'none';
+
+  // A boolean is a condition; where SQL wants a value it is 1, 0 or NULL,
+  // and a value in a condition's place is tested against 1
+  sqlNot(condition: string): string {
+    return `(CASE WHEN ${condition} THEN 1 ELSE 0 END = 0)`;
+  }
+
+  sqlNullIsTrue(condition: string): string {
+    return `(CASE WHEN NOT (${condition}) THEN 1 ELSE 0 END = 0)`;
+  }
+
+  sqlConditionAsValue(condition: string): string {
+    return `CASE WHEN ${condition} THEN 1 WHEN NOT (${condition}) THEN 0 END`;
+  }
+
+  sqlValueAsCondition(value: string): string {
+    return `(${value} = 1)`;
+  }
   // A datetimeoffset is an instant. Its clock is read at UTC, or in the
   // query's time zone, never at the offset it was written in.
   hasTimestamptz = true;

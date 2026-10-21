@@ -214,6 +214,17 @@ export const bqTableDef: SourceDef = {
 // Postgres table definition — Postgres is the only dialect with
 // `hasFinalStage = true`, so it is the one that exercises the persist-source
 // finalize=false path (see PersistSource.getSQL).
+// SQL Server has no boolean values (booleanType 'none'), so no column of
+// its table is a boolean
+export const mssqlTableDef: SourceDef = {
+  type: 'table',
+  name: 'aTable',
+  dialect: 'sqlserver',
+  tablePath: 'aTable',
+  connection: '_mssql_',
+  fields: baseFields.filter(f => f.name !== 'abool'),
+};
+
 export const pgTableDef: SourceDef = {
   type: 'table',
   name: 'aTable',
@@ -233,6 +244,7 @@ export const mockSchema: TableSourceDef[] = [
   db2TableDef,
   bqTableDef,
   pgTableDef,
+  mssqlTableDef,
   {
     type: 'table',
     name: 'carriers',
@@ -450,6 +462,7 @@ export class TestTranslator extends MalloyTranslator {
       _db2_: {type: 'connection', name: '_db2_'},
       _bq_: {type: 'connection', name: '_bq_'},
       _pg_: {type: 'connection', name: '_pg_'},
+      _mssql_: {type: 'connection', name: '_mssql_'},
       a: {...aTableDef, primaryKey: 'astr', name: 'a'},
       b: {...aTableDef, primaryKey: 'astr', name: 'b'},
       bq_a: {...bqTableDef, primaryKey: 'astr', name: 'bq_a'},
@@ -523,6 +536,7 @@ export class TestTranslator extends MalloyTranslator {
     this.connectionDialectZone.define('_db2_', TEST_DIALECT);
     this.connectionDialectZone.define('_bq_', 'standardsql');
     this.connectionDialectZone.define('_pg_', 'postgres');
+    this.connectionDialectZone.define('_mssql_', 'sqlserver');
     for (const flag of options.compilerFlags ?? []) {
       this.compilerFlagSrc.push(`##! ${flag}\n`);
     }
