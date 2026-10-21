@@ -49,12 +49,14 @@ export class ExprCast extends ExpressionDef {
     }
     const noCast =
       booleanValueError(fs, expr, 'in a cast', this, NUMBER_HINT) ||
+      // A cast makes a value, and there is no boolean value to make
       booleanValueError(
         fs,
         dataType,
         'as the type of a cast',
         this,
-        'write a comparison'
+        'write a comparison',
+        true
       );
     if (noCast) return noCast;
     return computedExprValue({

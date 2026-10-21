@@ -20,15 +20,17 @@ export function booleanValueError(
   type: {type: string} | undefined,
   where: string,
   logTo: MalloyElement,
-  hint: string
+  hint: string,
+  evenWhenCoerced = false
 ): ExprValue | undefined {
   const dialect = fs.dialectObj();
   if (type?.type !== 'boolean' || dialect?.booleanType !== 'none') {
     return undefined;
   }
   // The compiler coerces a boolean to a value in the boolean_coercion
-  // experiment, so no use of one is refused
-  if (logTo.inExperiment('boolean_coercion', true)) {
+  // experiment, so no use of one is refused, unless there is no value the
+  // use could coerce to
+  if (!evenWhenCoerced && logTo.inExperiment('boolean_coercion', true)) {
     return undefined;
   }
   return logTo.loggedErrorExpr('boolean-value-unsupported', {

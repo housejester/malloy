@@ -143,6 +143,15 @@ describe('boolean coercion on a dialect without boolean values', () => {
         sqlOf('run: m -> { group_by: ai, big } -> { where: big; select: ai }')
       ).toContain('WHERE (base."big" = 1)');
     });
+    test('a pick of conditions', () => {
+      expect(
+        sqlOf(
+          'run: m -> { where: pick big when ai > 1 else false; aggregate: n }'
+        )
+      ).toContain(
+        `WHERE (CASE WHEN (base."ai">1) THEN ${bigRef} ELSE CASE WHEN (1=0) THEN 1 WHEN NOT ((1=0)) THEN 0 END END = 1)`
+      );
+    });
     test('?? of booleans', () => {
       expect(
         sqlOf('run: m -> { where: big ?? false; aggregate: n }')
@@ -202,10 +211,40 @@ describe('boolean coercion on a dialect without boolean values', () => {
       expect(sql).toMatch(/WHERE LEFT\(/);
       expect(sql).not.toContain('CASE');
     });
+    test('raw SQL decides for itself', () => {
+      const sql = sqlOf(
+        'run: m -> { group_by: x is sql_number("""CASE WHEN ${big} THEN 1 ELSE 0 END""") }'
+      );
+      expect(sql).toContain(`CASE WHEN ${bigCond} THEN 1 ELSE 0 END as "x"`);
+    });
+    test('a boolean filter expression', () => {
+      expect(
+        sqlOf("run: m -> { where: big ~ f'true'; aggregate: n }")
+      ).toContain(`WHERE ${bigCond}`);
+      expect(
+        sqlOf("run: m -> { where: big ~ f'not true'; aggregate: n }")
+      ).toContain(`WHERE (CASE WHEN ${bigCond} THEN 1 ELSE 0 END = 0)`);
+      expect(
+        sqlOf("run: m -> { where: big ~ f'=false'; aggregate: n }")
+      ).toContain(`WHERE NOT (${bigCond})`);
+      expect(
+        sqlOf("run: m -> { where: big ~ f'null'; aggregate: n }")
+      ).toContain(
+        `WHERE CASE WHEN ${bigCond} THEN 1 WHEN NOT (${bigCond}) THEN 0 END IS NULL`
+      );
+    });
     test('a boolean parameter as a filter', () => {
       const sql = sqlOf('run: pm -> { where: pv; aggregate: n }');
       expect(sql).toContain('WHERE ((1=1))');
     });
+  });
+
+  test('a cast to boolean is still refused: there is no value to make', () => {
+    const tt = new TestTranslator(
+      prefix + 'run: m -> { where: ai::boolean; aggregate: n }'
+    );
+    const problems = tt.translate().problems ?? [];
+    expect(problems.map(p => p.code)).toContain('boolean-value-unsupported');
   });
 
   test('without the experiment a boolean value is still refused', () => {

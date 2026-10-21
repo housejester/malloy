@@ -429,6 +429,9 @@ export interface GenericSQLExpr extends ExprWithKids {
   node: 'genericSQLExpr';
   kids: {args: Expr[]};
   src: string[];
+  // SQL the model's author wrote (a sql_ function), as opposed to a
+  // function's implementation
+  authored?: boolean;
 }
 
 export interface NullNode extends ExprLeaf {

@@ -171,7 +171,23 @@ export const FilterCompilers = {
       // booleanCompile is self-safe (this if-chain has no default, and `none`
       // must not fall through to the null/false truth-table below).
       return noneToSQL(bc.not, d);
-    } else if (bc.operator === '=true') {
+    }
+    if (d.booleanType === 'none') {
+      // x is a condition, and the same truth table is written in conditions:
+      // an unknown condition already tests as false, and its negation as true
+      if (bc.operator === '=true') {
+        return bc.not ? `NOT ${px}` : x;
+      } else if (bc.operator === '=false') {
+        return bc.not ? x : `NOT ${px}`;
+      } else if (bc.operator === 'null') {
+        const v = d.sqlConditionAsValue(x);
+        return bc.not ? `${v} IS NOT NULL` : `${v} IS NULL`;
+      } else if (bc.operator === 'true') {
+        return bc.not ? d.sqlNot(x) : x;
+      }
+      return bc.not ? x : d.sqlNot(x);
+    }
+    if (bc.operator === '=true') {
       return bc.not ? `NOT ${px}` : x;
     } else if (bc.operator === '=false') {
       return bc.not ? x : `NOT ${px}`;

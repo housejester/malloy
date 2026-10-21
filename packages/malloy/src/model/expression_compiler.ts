@@ -123,7 +123,7 @@ function deepCopyExpr<T extends Expr>(expr: T): T {
  * a value, so the compiler tracks which kind each edge wants and which kind
  * each node produced, and asks the dialect to coerce where they differ.
  */
-export type SQLKind = 'value' | 'condition';
+export type SQLKind = 'value' | 'condition' | 'raw';
 
 /**
  * The kind a node wants from the child named `kid`, given the kind the
@@ -139,12 +139,20 @@ function wantFromKid(expr: Expr, kid: string, want: SQLKind): SQLKind {
     case '()':
       return want;
     case 'case':
+      // A CASE is a value, so its branches are values; a when is a
+      // condition unless there is a subject to compare it with
       if (kid === 'caseWhen') {
         return expr.kids.caseValue ? 'value' : 'condition';
       }
-      return kid === 'caseValue' ? 'value' : want;
+      return 'value';
     case 'filteredExpr':
       return kid === 'filterList' ? 'condition' : 'value';
+    case 'genericSQLExpr':
+      // SQL the author wrote says what it wants itself; a function's
+      // implementation wants values
+      return expr.authored ? 'raw' : 'value';
+    case 'filterMatch':
+      return expr.dataType === 'boolean' ? 'condition' : 'value';
     default:
       return 'value';
   }
@@ -187,7 +195,6 @@ function kindProduced(expr: Expr, want: SQLKind): SQLKind {
     case 'parameter':
     case 'given':
     case '()':
-    case 'case':
       return want;
     default:
       return 'value';
@@ -200,7 +207,7 @@ function asKind(
   produced: SQLKind,
   want: SQLKind
 ): string {
-  if (produced === want) {
+  if (produced === want || want === 'raw') {
     return sql;
   }
   return produced === 'condition'
@@ -1325,7 +1332,13 @@ export function* stringsFromSQLExpression(
     yield str;
     const expr = subExprList.shift();
     if (expr) {
-      yield exprToSQL(resultSet, context, expr, state);
+      yield exprToSQL(
+        resultSet,
+        context,
+        expr,
+        state,
+        e.authored ? 'raw' : 'value'
+      );
     }
   }
 }
