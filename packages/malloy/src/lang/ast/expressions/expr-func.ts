@@ -471,7 +471,12 @@ export class ExprFunc extends ExpressionDef {
           }
         }
 
-        funcCall = composeSQLExpr(expr);
+        const sqlExpr = composeSQLExpr(expr);
+        // The compiler needs to know this raw SQL is a condition
+        if (func.name === 'sql_boolean') {
+          sqlExpr.typeDef = {type: 'boolean'};
+        }
+        funcCall = sqlExpr;
       }
     }
     const maxEvalSpace = mergeEvalSpaces(...argExprs.map(e => e.evalSpace));

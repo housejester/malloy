@@ -1264,6 +1264,27 @@ export abstract class Dialect {
   }
 
   /**
+   * A condition, where a value is wanted. Without a boolean value the
+   * condition becomes 1, 0, or NULL when it is unknown.
+   */
+  sqlConditionAsValue(condition: string): string {
+    if (this.booleanType === 'none') {
+      return `CASE WHEN ${condition} THEN 1 WHEN NOT (${condition}) THEN 0 END`;
+    }
+    return condition;
+  }
+
+  /**
+   * A value, where a condition is wanted: the value a condition became.
+   */
+  sqlValueAsCondition(value: string): string {
+    if (this.booleanType === 'none') {
+      return `(${value} = 1)`;
+    }
+    return value;
+  }
+
+  /**
    * What a boolean value looks like in a query result
    */
   resultBoolean(bv: boolean) {

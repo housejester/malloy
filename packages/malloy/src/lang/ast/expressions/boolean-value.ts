@@ -26,6 +26,11 @@ export function booleanValueError(
   if (type?.type !== 'boolean' || dialect?.booleanType !== 'none') {
     return undefined;
   }
+  // The compiler coerces a boolean to a value in the boolean_coercion
+  // experiment, so no use of one is refused
+  if (logTo.inExperiment('boolean_coercion', true)) {
+    return undefined;
+  }
   return logTo.loggedErrorExpr('boolean-value-unsupported', {
     dialect: dialect.name,
     where,

@@ -116,12 +116,105 @@ function deepCopyExpr<T extends Expr>(expr: T): T {
  * Compiles an expression tree by mutating it in-place to set all .sql fields.
  * Assumes the expression tree is already a copy that can be mutated.
  */
+/**
+ * The kind of SQL an expression is: a value, or a condition. A dialect with
+ * boolean values has one kind; on a dialect without them a condition can
+ * only stand where SQL wants a condition, and a value only where it wants
+ * a value, so the compiler tracks which kind each edge wants and which kind
+ * each node produced, and asks the dialect to coerce where they differ.
+ */
+export type SQLKind = 'value' | 'condition';
+
+/**
+ * The kind a node wants from the child named `kid`, given the kind the
+ * node itself was asked for.
+ */
+function wantFromKid(expr: Expr, kid: string, want: SQLKind): SQLKind {
+  switch (expr.node) {
+    case 'and':
+    case 'or':
+    case 'not':
+    case 'filterCondition':
+      return 'condition';
+    case '()':
+      return want;
+    case 'case':
+      if (kid === 'caseWhen') {
+        return expr.kids.caseValue ? 'value' : 'condition';
+      }
+      return kid === 'caseValue' ? 'value' : want;
+    case 'filteredExpr':
+      return kid === 'filterList' ? 'condition' : 'value';
+    default:
+      return 'value';
+  }
+}
+
+/**
+ * The kind a node produced. A node which passes its want through to its
+ * expression (a field, a parameter, a case) produced what it was asked for.
+ */
+function kindProduced(expr: Expr, want: SQLKind): SQLKind {
+  switch (expr.node) {
+    case '>':
+    case '<':
+    case '>=':
+    case '<=':
+    case '=':
+    case '!=':
+    case 'and':
+    case 'or':
+    case 'not':
+    case 'like':
+    case '!like':
+    case 'in':
+    case 'inGiven':
+    case 'regexpMatch':
+    case 'filterMatch':
+    case 'is-null':
+    case 'is-not-null':
+    case 'true':
+    case 'false':
+    case 'filterCondition':
+      return 'condition';
+    case 'function_call':
+      return expr.overload.returnType.type === 'boolean'
+        ? 'condition'
+        : 'value';
+    case 'genericSQLExpr':
+      return expr.typeDef?.type === 'boolean' ? 'condition' : 'value';
+    case 'field':
+    case 'parameter':
+    case 'given':
+    case '()':
+    case 'case':
+      return want;
+    default:
+      return 'value';
+  }
+}
+
+function asKind(
+  dialect: Dialect,
+  sql: string,
+  produced: SQLKind,
+  want: SQLKind
+): string {
+  if (produced === want) {
+    return sql;
+  }
+  return produced === 'condition'
+    ? dialect.sqlConditionAsValue(sql)
+    : dialect.sqlValueAsCondition(sql);
+}
+
 function compileExpr<T extends Expr>(
   resultSet: FieldInstanceResult,
   context: QueryStruct,
   expr: T,
   state: GenerateState = new GenerateState(),
-  wrap = true
+  wrap = true,
+  want: SQLKind = 'value'
 ): T {
   /*
    * Translate the children first, and stash the translation
@@ -129,19 +222,33 @@ function compileExpr<T extends Expr>(
    * it will have access to the translated children.
    */
   if (exprHasE(expr)) {
-    compileExpr(resultSet, context, expr.e, state);
+    compileExpr(
+      resultSet,
+      context,
+      expr.e,
+      state,
+      true,
+      wantFromKid(expr, 'e', want)
+    );
   } else if (exprHasKids(expr)) {
-    for (const kidExpr of Object.values(expr.kids)) {
+    for (const [kidName, kidExpr] of Object.entries(expr.kids)) {
       if (kidExpr === null) continue;
+      const kidWant = wantFromKid(expr, kidName, want);
       if (Array.isArray(kidExpr)) {
         for (const e of kidExpr) {
-          compileExpr(resultSet, context, e, state);
+          compileExpr(resultSet, context, e, state, true, kidWant);
         }
       } else {
-        compileExpr(resultSet, context, kidExpr, state);
+        compileExpr(resultSet, context, kidExpr, state, true, kidWant);
       }
     }
   }
+
+  const finish = (sql: string): T => {
+    const wrapped = wrap && exprHasKids(expr) ? `(${sql})` : sql;
+    expr.sql = asKind(context.dialect, wrapped, kindProduced(expr, want), want);
+    return expr;
+  };
 
   /*
    * Give the dialect a chance to translate this node
@@ -149,18 +256,17 @@ function compileExpr<T extends Expr>(
   const qi = resultSet.getQueryInfo();
   const dialectSQL = context.dialect.exprToSQL(qi, expr);
   if (dialectSQL) {
-    expr.sql = wrap && exprHasKids(expr) ? `(${dialectSQL})` : dialectSQL;
-    return expr;
+    return finish(dialectSQL);
   }
 
   const sql = (() => {
     switch (expr.node) {
       case 'field':
-        return generateFieldFragment(resultSet, context, expr, state);
+        return generateFieldFragment(resultSet, context, expr, state, want);
       case 'parameter':
-        return generateParameterFragment(resultSet, context, expr, state);
+        return generateParameterFragment(resultSet, context, expr, state, want);
       case 'given':
-        return generateGivenFragment(resultSet, context, expr, state);
+        return generateGivenFragment(resultSet, context, expr, state, want);
       case 'filteredExpr':
         return generateFilterFragment(resultSet, context, expr, state);
       case 'all':
@@ -319,8 +425,7 @@ function compileExpr<T extends Expr>(
     }
   })();
 
-  expr.sql = wrap && exprHasKids(expr) ? `(${sql})` : sql;
-  return expr;
+  return finish(sql);
 }
 
 /**
@@ -331,13 +436,21 @@ export function exprToSQL(
   resultSet: FieldInstanceResult,
   context: QueryStruct,
   exprToTranslate: Expr,
-  state: GenerateState = new GenerateState()
+  state: GenerateState = new GenerateState(),
+  want: SQLKind = 'value'
 ): string {
   // Make a deep copy that we can mutate during compilation
   const exprCopy = deepCopyExpr(exprToTranslate);
 
   // Compile the copy, setting .sql on all nodes
-  const compiled = compileExpr(resultSet, context, exprCopy, state, false);
+  const compiled = compileExpr(
+    resultSet,
+    context,
+    exprCopy,
+    state,
+    false,
+    want
+  );
 
   return compiled.sql!;
 }
@@ -799,7 +912,8 @@ export function generateFieldFragment(
   resultSet: FieldInstanceResult,
   context: QueryStruct,
   expr: FieldnameNode,
-  state: GenerateState
+  state: GenerateState,
+  want: SQLKind = 'value'
 ): string {
   // find the structDef and return the path to the field...
   const fieldRef = context.getFieldByName(expr.path, expr.at);
@@ -808,7 +922,8 @@ export function generateFieldFragment(
       resultSet,
       fieldRef.parent,
       fieldRef.fieldDef.e,
-      state
+      state,
+      want
     );
     return `(${ret})`;
   } else {
@@ -824,7 +939,7 @@ export function generateFieldFragment(
     }
 
     // The normal case - just generate the SQL reference
-    return sqlFullChildReference(
+    const ref = sqlFullChildReference(
       fieldRef.parent,
       fieldRef.fieldDef.name,
       fieldRef.parent.structDef.type === 'record'
@@ -834,6 +949,11 @@ export function generateFieldFragment(
           }
         : undefined
     );
+    // A boolean column holds the value a condition became
+    if (fieldRef.fieldDef.type === 'boolean' && want === 'condition') {
+      return context.dialect.sqlValueAsCondition(ref);
+    }
+    return ref;
   }
 }
 
@@ -850,13 +970,14 @@ export function generateParameterFragment(
   resultSet: FieldInstanceResult,
   context: QueryStruct,
   expr: ParameterNode,
-  state: GenerateState
+  state: GenerateState,
+  want: SQLKind = 'value'
 ): string {
   const name = expr.path[0];
   context.eventStream?.emit('source-argument-compiled', {name});
   const argument = safeRecordGet(context.arguments(), name);
   if (argument?.value) {
-    return exprToSQL(resultSet, context, argument.value, state);
+    return exprToSQL(resultSet, context, argument.value, state, want);
   }
   throw new MalloyCompileError(
     `Parameter '${expr.path.join('.')}' has no value supplied.`,
@@ -892,12 +1013,13 @@ export function generateGivenFragment(
   resultSet: FieldInstanceResult,
   context: QueryStruct,
   expr: GivenRefNode,
-  state: GenerateState
+  state: GenerateState,
+  want: SQLKind = 'value'
 ): string {
   // The bound expr may itself be a `$OTHER`-bearing expression; recursive
   // compile handles default chains.
   const bound = resolveGivenBoundExpr(context, expr);
-  return exprToSQL(resultSet, context, bound, state);
+  return exprToSQL(resultSet, context, bound, state, want);
 }
 
 function unsatisfiedGivenMessage(refName: string): string {
@@ -917,7 +1039,9 @@ export function generateFilterFragment(
 ): string {
   const allWhere = new AndChain(state.whereSQL);
   for (const cond of expr.kids.filterList) {
-    allWhere.add(exprToSQL(resultSet, context, cond.e, state.withWhere()));
+    allWhere.add(
+      exprToSQL(resultSet, context, cond.e, state.withWhere(), 'condition')
+    );
   }
   return exprToSQL(
     resultSet,

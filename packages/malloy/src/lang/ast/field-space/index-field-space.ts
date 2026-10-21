@@ -130,7 +130,11 @@ export class IndexFieldSpace extends QueryOperationSpace {
           expressionIsScalar(eTypeDesc.expressionType) &&
           (dialect === undefined || !dialect.ignoreInProject(name))
         ) {
-          if (eTypeDesc.type === 'boolean' && dialect?.booleanType === 'none') {
+          if (
+            eTypeDesc.type === 'boolean' &&
+            dialect?.booleanType === 'none' &&
+            !wild.inExperiment('boolean_coercion', true)
+          ) {
             const path = [...joinPath, name].join('.');
             wild.logWarning('wildcard-omits-boolean', {
               dialect: dialect.name,

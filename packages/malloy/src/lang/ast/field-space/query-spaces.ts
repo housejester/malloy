@@ -213,7 +213,11 @@ export abstract class QueryOperationSpace
           model.expressionIsScalar(eType.expressionType) &&
           (dialect === undefined || !dialect.ignoreInProject(name))
         ) {
-          if (eType.type === 'boolean' && dialect?.booleanType === 'none') {
+          if (
+            eType.type === 'boolean' &&
+            dialect?.booleanType === 'none' &&
+            !wild.inExperiment('boolean_coercion', true)
+          ) {
             const path = joinPath.concat(name).join('.');
             wild.logWarning('wildcard-omits-boolean', {
               dialect: dialect.name,
