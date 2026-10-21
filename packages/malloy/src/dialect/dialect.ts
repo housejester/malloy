@@ -1242,6 +1242,49 @@ export abstract class Dialect {
   }
 
   /**
+   * Malloy's `not`: of NULL, true. A dialect with booleanType 'none' has no
+   * boolean value for COALESCE to return, so the test is written as a
+   * condition.
+   */
+  sqlNot(condition: string): string {
+    if (this.booleanType === 'none') {
+      return `(CASE WHEN ${condition} THEN 1 ELSE 0 END = 0)`;
+    }
+    return `COALESCE(NOT ${condition},TRUE)`;
+  }
+
+  /**
+   * A condition Malloy defines as true when SQL says NULL: `!=` and `!~`
+   */
+  sqlNullIsTrue(condition: string): string {
+    if (this.booleanType === 'none') {
+      return `(CASE WHEN NOT (${condition}) THEN 1 ELSE 0 END = 0)`;
+    }
+    return `COALESCE(${condition},true)`;
+  }
+
+  /**
+   * A condition, where a value is wanted. Without a boolean value the
+   * condition becomes 1, 0, or NULL when it is unknown.
+   */
+  sqlConditionAsValue(condition: string): string {
+    if (this.booleanType === 'none') {
+      return `CASE WHEN ${condition} THEN 1 WHEN NOT (${condition}) THEN 0 END`;
+    }
+    return condition;
+  }
+
+  /**
+   * A value, where a condition is wanted: the value a condition became.
+   */
+  sqlValueAsCondition(value: string): string {
+    if (this.booleanType === 'none') {
+      return `(${value} = 1)`;
+    }
+    return value;
+  }
+
+  /**
    * What a boolean value looks like in a query result
    */
   resultBoolean(bv: boolean) {
